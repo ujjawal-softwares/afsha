@@ -1,3 +1,3 @@
 #! /bin/sh
 
-cmake -S . -B ./out/build
+cmake -S . -DSDL_SHARED=OFF -DSDL_STATIC=ON -B ./out/build
