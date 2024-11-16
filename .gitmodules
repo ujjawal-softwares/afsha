@@ -4,6 +4,3 @@
 [submodule "external/imgui"]
 	path = external/imgui
 	url = https://github.com/ocornut/imgui
-[submodule "external/whisper.cpp"]
-	path = external/whisper.cpp
-	url = https://github.com/ggerganov/whisper.cpp.git
