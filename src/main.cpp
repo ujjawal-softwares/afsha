@@ -27,9 +27,9 @@ static SDL_Window *window = NULL;
 static SDL_Renderer *renderer = NULL;
 static SDL_GLContext gl_context = NULL;
 static bool show_demo_window = true;
-static bool show_another_window = false;
 static ImVec4 clear_color = ImVec4(0.45f, 0.55f, 0.60f, 1.00f);
 static ImGuiIO *ioRef = NULL;
+static ImFont *font = NULL;
 
 
 const std::string APP_VERSION = APP_VERSION_MAJOR + \
@@ -77,7 +77,7 @@ SDL_AppResult SDL_AppInit(void **appstate, int argc, char *argv[]) {
     SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
     SDL_GL_SetAttribute(SDL_GL_DEPTH_SIZE, 24);
     SDL_GL_SetAttribute(SDL_GL_STENCIL_SIZE, 8);
-    Uint32 window_flags = SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIDDEN;
+    Uint32 window_flags = SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIDDEN | SDL_WINDOW_HIGH_PIXEL_DENSITY;
     window = SDL_CreateWindow(WINDOW_TITLE.c_str(), WIDTH, HEIGHT, window_flags);
     if (!window) {
         SDL_Log("Couldn't create window/renderer: %s", SDL_GetError());
@@ -136,14 +136,20 @@ SDL_AppResult SDL_AppInit(void **appstate, int argc, char *argv[]) {
     //io.Fonts->AddFontFromFileTTF("../../misc/fonts/Cousine-Regular.ttf", 15.0f);
     //ImFont* font = io.Fonts->AddFontFromFileTTF("c:\\Windows\\Fonts\\ArialUni.ttf", 18.0f, nullptr, io.Fonts->GetGlyphRangesJapanese());
     //IM_ASSERT(font != nullptr);
+
+    // TODO: if font not found, log and skip. Don't crash.
+    // TODO: embed fonts in source code: https://github.com/ocornut/imgui/blob/master/docs/FONTS.md#loading-font-data-embedded-in-source-code
+    // TODO: Add support for emojis.
+    // font = io.Fonts->AddFontFromFileTTF("./static/fonts/SF-Pro.ttf", 20.0f);
+    // font = io.Fonts->AddFontFromFileTTF("./static/fonts/SF-Pro-Display-Regular.otf", 16.0f);
+    // IM_ASSERT(font != nullptr);
     SDL_Log("SDL_AppInit complete");
     return SDL_APP_CONTINUE;  /* carry on with the program! */
 
 }
 
 /* This function runs when a new event (mouse input, keypresses, etc) occurs. */
-SDL_AppResult SDL_AppEvent(void *appstate, SDL_Event *event)
-{
+SDL_AppResult SDL_AppEvent(void *appstate, SDL_Event *event) {
     // Poll and handle events (inputs, window resize, etc.)
     // You can read the io.WantCaptureMouse, io.WantCaptureKeyboard flags to tell if dear imgui wants to use your inputs.
     // - When io.WantCaptureMouse is true, do not dispatch mouse input data to your main application, or clear/overwrite your copy of the mouse data.
@@ -162,13 +168,26 @@ SDL_AppResult SDL_AppEvent(void *appstate, SDL_Event *event)
 }
 
 /* This function runs once at shutdown. */
-void SDL_AppQuit(void *appstate, SDL_AppResult result)
-{
+void SDL_AppQuit(void *appstate, SDL_AppResult result) {
     SDL_Log("SDL_AppQuit called with result %d, cleaning up", result);
     /* SDL will clean up the window/renderer for us. */
     ImGui_ImplOpenGL3_Shutdown();
     ImGui_ImplSDL3_Shutdown();
     ImGui::DestroyContext();
+}
+
+void show_current_state() {
+    // TODO: Only show audio stream when it is available.
+    // TODO: Integrate whisper.cpp
+    ImGui::Begin(
+        "audio stream",
+        nullptr,
+        ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoBackground
+    );
+    // Text heading
+    ImGui::Text("Hello world");
+    // ImGui::Text("This is some useful text.");
+    ImGui::End();
 }
 
 SDL_AppResult SDL_AppIterate(void *appstate) {
@@ -183,41 +202,10 @@ SDL_AppResult SDL_AppIterate(void *appstate) {
     ImGui::NewFrame();
 
     // 1. Show the big demo window (Most of the sample code is in ImGui::ShowDemoWindow()! You can browse its code to learn more about Dear ImGui!).
-    if (show_demo_window)
-        ImGui::ShowDemoWindow(&show_demo_window);
+    // if (show_demo_window)
+        // ImGui::ShowDemoWindow(&show_demo_window);
 
-    // 2. Show a simple window that we create ourselves. We use a Begin/End pair to create a named window.
-    {
-        static float f = 0.0f;
-        static int counter = 0;
-
-        ImGui::Begin("Hello, world!");                          // Create a window called "Hello, world!" and append into it.
-
-        ImGui::Text("This is some useful text.");               // Display some text (you can use a format strings too)
-        ImGui::Checkbox("Demo Window", &show_demo_window);      // Edit bools storing our window open/close state
-        ImGui::Checkbox("Another Window", &show_another_window);
-
-        ImGui::SliderFloat("float", &f, 0.0f, 1.0f);            // Edit 1 float using a slider from 0.0f to 1.0f
-        ImGui::ColorEdit3("clear color", (float*)&clear_color); // Edit 3 floats representing a color
-
-        if (ImGui::Button("Button"))                            // Buttons return true when clicked (most widgets return true when edited/activated)
-            counter++;
-        ImGui::SameLine();
-        ImGui::Text("counter = %d", counter);
-
-        ImGui::Text("Application average %.3f ms/frame (%.1f FPS)", 1000.0f / ioRef->Framerate, ioRef->Framerate);
-        ImGui::End();
-    }
-
-    // 3. Show another simple window.
-    if (show_another_window)
-    {
-        ImGui::Begin("Another Window", &show_another_window);   // Pass a pointer to our bool variable (the window will have a closing button that will clear the bool when clicked)
-        ImGui::Text("Hello from another window!");
-        if (ImGui::Button("Close Me"))
-            show_another_window = false;
-        ImGui::End();
-    }
+    show_current_state();
 
     // Rendering
     ImGui::Render();
