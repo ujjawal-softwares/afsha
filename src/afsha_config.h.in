@@ -1,6 +1,0 @@
-#define AFSHA_VERSION_MAJOR "@afsha_VERSION_MAJOR@"
-#define AFSHA_VERSION_MINOR "@afsha_VERSION_MINOR@"
-#define AFSHA_VERSION_PATCH "@afsha_VERSION_PATCH@"
-
-#define APP_NAME "@PROJECT_NAME@"
-#define APP_IDENTIFIER "com.ujjawalsoftwares.afsha"
