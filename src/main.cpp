@@ -21,13 +21,13 @@
 
 
 static const int WIDTH = 800;
-static const int HEIGHT = 600;
+static const int HEIGHT = 480;
+static const int PADDING = 10;
 /* We will use this renderer to draw into this window every frame. */
 static SDL_Window *window = NULL;
 static SDL_Renderer *renderer = NULL;
 static SDL_GLContext gl_context = NULL;
 static bool show_demo_window = true;
-static ImVec4 clear_color = ImVec4(0.45f, 0.55f, 0.60f, 1.00f);
 static ImGuiIO *ioRef = NULL;
 static ImFont *font = NULL;
 
@@ -177,16 +177,22 @@ void SDL_AppQuit(void *appstate, SDL_AppResult result) {
 }
 
 void show_current_state() {
-    // TODO: Only show audio stream when it is available.
-    // TODO: Integrate whisper.cpp
+    // Note: https://pthom.github.io/imgui_manual_online/manual/imgui_manual.html
+
+    const ImVec2 window_size = ImVec2(HEIGHT / 2, WIDTH / 2);
+    ImGui::SetNextWindowSize(window_size, ImGuiCond_FirstUseEver);
+    const ImVec2 top_right = ImVec2(ioRef->DisplaySize.x - window_size.x , PADDING);
+    ImGui::SetNextWindowPos(top_right, ImGuiCond_FirstUseEver);
     ImGui::Begin(
-        "audio stream",
+        "Audio Stream",
         nullptr,
-        ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoBackground
+        ImGuiWindowFlags_NoResize | \
+        ImGuiWindowFlags_NoMove | \
+        ImGuiWindowFlags_NoSavedSettings | \
+        ImGuiWindowFlags_NoBackground
     );
-    // Text heading
-    ImGui::Text("Hello world");
-    // ImGui::Text("This is some useful text.");
+    // TODO: Show audio stream here, use whisper cpp
+    ImGui::TextWrapped("Lorem ipsum dolor sit amet, consectetur adipiscing elit. Vestibulum placerat volutpat diam quis finibus. Aliquam vestibulum, nisl vitae euismod molestie, mauris nulla laoreet nibh, eu interdum sem mi eget diam. Proin a justo nisi. Maecenas elementum lectus et lorem malesuada, nec volutpat massa pulvinar. Suspendisse nisl sapien, posuere sed faucibus sit amet, finibus at tellus. Nunc ante libero, dictum vitae efficitur nec, placerat id massa. Aliquam sit amet lacus at nibh fringilla accumsan eu ac arcu. Phasellus quis pretium arcu, et laoreet velit. Aenean et ex id est sagittis sagittis. Duis at eros ante. Vivamus pulvinar mauris a justo tempor, et elementum ex finibus.");
     ImGui::End();
 }
 
@@ -203,14 +209,14 @@ SDL_AppResult SDL_AppIterate(void *appstate) {
 
     // 1. Show the big demo window (Most of the sample code is in ImGui::ShowDemoWindow()! You can browse its code to learn more about Dear ImGui!).
     // if (show_demo_window)
-        // ImGui::ShowDemoWindow(&show_demo_window);
+    //     ImGui::ShowDemoWindow(&show_demo_window);
 
     show_current_state();
 
     // Rendering
     ImGui::Render();
     glViewport(0, 0, (int)ioRef->DisplaySize.x, (int)ioRef->DisplaySize.y);
-    glClearColor(clear_color.x * clear_color.w, clear_color.y * clear_color.w, clear_color.z * clear_color.w, clear_color.w);
+    // glClearColor(clear_color.x * clear_color.w, clear_color.y * clear_color.w, clear_color.z * clear_color.w, clear_color.w);
     glClear(GL_COLOR_BUFFER_BIT);
     ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
     SDL_GL_SwapWindow(window);
