@@ -4,6 +4,7 @@
 #include <fstream>
 #include <sstream>
 #include <vector>
+#include <queue>
 #include <thread>
 #include "imgui.h"
 #include "imgui_impl_sdl3.h"
@@ -76,8 +77,12 @@ static std::vector<whisper_token> prompt_tokens_for_speech_recognition(n_samples
 
 
 static struct whisper_context *whisper_ctx = NULL;
-static std::string audio_filename;
+// static std::string audio_filename;
 // static wav_writer wavWriter;
+
+static std::deque<std::string> text_speech_recognition;
+static int text_speech_recognition_size = 20;
+
 
 // TODO: We can parse this from the command line arguments
 // struct whisper_params {
@@ -240,10 +245,10 @@ SDL_AppResult SDL_AppInit(void **appstate, int argc, char *argv[]) {
     SDL_ResumeAudioStreamDevice(stream);
 
     // Get current date/time for filename
-    time_t now = time(0);
-    char buffer[80];
-    strftime(buffer, sizeof(buffer), "%Y%m%d%H%M%S", localtime(&now));
-    audio_filename = std::string(buffer) + ".wav";
+    // time_t now = time(0);
+    // char buffer[80];
+    // strftime(buffer, sizeof(buffer), "%Y%m%d%H%M%S", localtime(&now));
+    // audio_filename = std::string(buffer) + ".wav";
 
     // wavWriter.open(audio_filename, audio_spec.freq, 16, audio_spec.channels);
 
@@ -292,7 +297,7 @@ void SDL_AppQuit(void *appstate, SDL_AppResult result) {
 void show_current_state() {
     // Note: https://pthom.github.io/imgui_manual_online/manual/imgui_manual.html
 
-    const ImVec2 window_size = ImVec2(HEIGHT / 2, WIDTH / 2);
+    const ImVec2 window_size = ImVec2(HEIGHT - PADDING, WIDTH / 2);
     ImGui::SetNextWindowSize(window_size, ImGuiCond_FirstUseEver);
     const ImVec2 top_right = ImVec2(ioRef->DisplaySize.x - window_size.x , PADDING);
     ImGui::SetNextWindowPos(top_right, ImGuiCond_FirstUseEver);
@@ -304,8 +309,12 @@ void show_current_state() {
         ImGuiWindowFlags_NoSavedSettings | \
         ImGuiWindowFlags_NoBackground
     );
+    std::string text_in_queue = "";
+    for (const auto &text : text_speech_recognition) {
+        text_in_queue += text + "\n";
+    }
     // TODO: Show audio stream here, use whisper cpp
-    ImGui::TextWrapped("Lorem ipsum dolor sit amet, consectetur adipiscing elit. Vestibulum placerat volutpat diam quis finibus. Aliquam vestibulum, nisl vitae euismod molestie, mauris nulla laoreet nibh, eu interdum sem mi eget diam. Proin a justo nisi. Maecenas elementum lectus et lorem malesuada, nec volutpat massa pulvinar. Suspendisse nisl sapien, posuere sed faucibus sit amet, finibus at tellus. Nunc ante libero, dictum vitae efficitur nec, placerat id massa. Aliquam sit amet lacus at nibh fringilla accumsan eu ac arcu. Phasellus quis pretium arcu, et laoreet velit. Aenean et ex id est sagittis sagittis. Duis at eros ante. Vivamus pulvinar mauris a justo tempor, et elementum ex finibus.");
+    ImGui::TextWrapped(text_in_queue.c_str());
     ImGui::End();
 }
 
@@ -384,8 +393,14 @@ void run_whisper() {
 
     const int n_segments = whisper_full_n_segments(whisper_ctx);
     for (int i = 0; i < n_segments; ++i) {
-        const char * text = whisper_full_get_segment_text(whisper_ctx, i);
+        const char *text = whisper_full_get_segment_text(whisper_ctx, i);
         SDL_Log("%s", text);
+
+        if (text_speech_recognition.size() >= text_speech_recognition_size) {
+            text_speech_recognition.pop_front();
+        }
+
+        text_speech_recognition.push_back(text);
 
         const int token_count = whisper_full_n_tokens(whisper_ctx, i);
         for (int j = 0; j < token_count; ++j) {
