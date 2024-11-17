@@ -67,10 +67,10 @@ static int audio_buffer_for_speech_recognition_pos = 0;
 
 // why do we need old audio buffer? because we need n_samples_keep samples from the old buffer
 // so that we can concatenate it with the new buffer
-static std::vector<float> old_audio_buffer_for_speech_recognition(n_samples_keep, 0.0f);
-static int old_audio_buffer_for_speech_recognition_pos = 0;
+static std::vector<float> audio_buffer_for_speech_recognition_old(n_samples_keep, 0.0f);
+static int audio_buffer_for_speech_recognition_old_pos = 0;
 
-static std::vector<float> combined_audio_buffer_for_speech_recognition(n_samples_30s + n_samples_keep, 0.0f);
+static std::vector<float> audio_buffer_for_speech_recognition_combined(n_samples_30s + n_samples_keep, 0.0f);
 
 // They are used to store the tokens from the last full length segment as the prompt
 static std::vector<whisper_token> prompt_tokens_for_speech_recognition(n_samples_30s);
@@ -81,7 +81,7 @@ static struct whisper_context *whisper_ctx = NULL;
 // static wav_writer wavWriter;
 
 static std::deque<std::string> text_speech_recognition;
-static int text_speech_recognition_size = 20;
+static int text_speech_recognition_size = 1000;
 
 
 // TODO: We can parse this from the command line arguments
@@ -296,25 +296,46 @@ void SDL_AppQuit(void *appstate, SDL_AppResult result) {
 
 void show_current_state() {
     // Note: https://pthom.github.io/imgui_manual_online/manual/imgui_manual.html
-
-    const ImVec2 window_size = ImVec2(HEIGHT - PADDING, WIDTH / 2);
-    ImGui::SetNextWindowSize(window_size, ImGuiCond_FirstUseEver);
-    const ImVec2 top_right = ImVec2(ioRef->DisplaySize.x - window_size.x , PADDING);
-    ImGui::SetNextWindowPos(top_right, ImGuiCond_FirstUseEver);
-    ImGui::Begin(
-        "Audio Stream",
-        nullptr,
-        ImGuiWindowFlags_NoResize | \
+    const int window_flags = ImGuiWindowFlags_NoResize | \
         ImGuiWindowFlags_NoMove | \
         ImGuiWindowFlags_NoSavedSettings | \
-        ImGuiWindowFlags_NoBackground
+        ImGuiWindowFlags_NoBackground;
+
+    // Create a window for the right hand side of the screen
+    const ImVec2 content_region = {ioRef->DisplaySize.x, ioRef->DisplaySize.y};
+
+
+    const ImVec2 window_size = ImVec2(content_region.x / 2 - PADDING, content_region.y - PADDING * 2);
+    ImGui::SetNextWindowSize(window_size);
+    const ImVec2 window_postition = ImVec2(ioRef->DisplaySize.x - window_size.x - PADDING, PADDING);
+    ImGui::SetNextWindowPos(window_postition);
+    ImGui::Begin(
+        "Current State",
+        nullptr,
+        window_flags
     );
-    std::string text_in_queue = "";
-    for (const auto &text : text_speech_recognition) {
-        text_in_queue += text + "\n";
+    ImGui::TextWrapped("Application version: %s", APP_VERSION.c_str());
+    ImGui::TextWrapped("Application average %.3f ms/frame (%.1f FPS)", 1000.0f / ioRef->Framerate, ioRef->Framerate);
+    ImGui::TextWrapped("Application window size: %.0f x %.0f", ioRef->DisplaySize.x, ioRef->DisplaySize.y);
+    if (ImGui::BeginTabBar("Current State Tab Bar", ImGuiTabBarFlags_None)) {
+        if (ImGui::BeginTabItem("Audio Stream")) {
+            ImGui::BeginChild(
+                "Audio Stream",
+                ImVec2(ImGui::GetContentRegionAvail().x, ImGui::GetContentRegionAvail().y),
+                ImGuiChildFlags_None,
+                ImGuiWindowFlags_AlwaysVerticalScrollbar
+            );
+            std::string text_in_queue = "";
+            for (const auto &text : text_speech_recognition) {
+                text_in_queue += text + "\n";
+            }
+            // TODO: Show audio stream here, use whisper cpp
+            ImGui::TextWrapped(text_in_queue.c_str());
+            ImGui::EndChild();
+            ImGui::EndTabItem();
+        }
     }
-    // TODO: Show audio stream here, use whisper cpp
-    ImGui::TextWrapped(text_in_queue.c_str());
+    ImGui::EndTabBar();
     ImGui::End();
 }
 
@@ -359,16 +380,16 @@ void run_whisper() {
     if (audio_buffer_for_speech_recognition_pos < n_samples_step) {
         return;
     }
-    const int n_samples_to_keep = std::min(n_samples_keep, old_audio_buffer_for_speech_recognition_pos);
+    const int n_samples_to_keep = std::min(n_samples_keep, audio_buffer_for_speech_recognition_old_pos);
     // SDL_Log("n_samples_to_keep: %d", n_samples_to_keep);
-    combined_audio_buffer_for_speech_recognition.clear();
+    audio_buffer_for_speech_recognition_combined.clear();
     memcpy(
-        combined_audio_buffer_for_speech_recognition.data(),
-        old_audio_buffer_for_speech_recognition.data() + old_audio_buffer_for_speech_recognition_pos - n_samples_to_keep,
+        audio_buffer_for_speech_recognition_combined.data(),
+        audio_buffer_for_speech_recognition_old.data() + audio_buffer_for_speech_recognition_old_pos - n_samples_to_keep,
         sizeof(float) * n_samples_to_keep
     );
     memcpy(
-        combined_audio_buffer_for_speech_recognition.data() + n_samples_to_keep,
+        audio_buffer_for_speech_recognition_combined.data() + n_samples_to_keep,
         audio_buffer_for_speech_recognition.data(),
         sizeof(float) * audio_buffer_for_speech_recognition_pos
     );
@@ -376,17 +397,17 @@ void run_whisper() {
     whisper_full_params wparams = whisper_full_default_params(WHISPER_SAMPLING_GREEDY);
     wparams.prompt_tokens = prompt_tokens_for_speech_recognition.data();
 
-    if (whisper_full(whisper_ctx, wparams, combined_audio_buffer_for_speech_recognition.data(), audio_buffer_for_speech_recognition_pos + n_samples_to_keep) != 0) {
+    if (whisper_full(whisper_ctx, wparams, audio_buffer_for_speech_recognition_combined.data(), audio_buffer_for_speech_recognition_pos + n_samples_to_keep) != 0) {
         SDL_Log("Failed to process audio");
         return;
     }
 
     memcpy(
-        old_audio_buffer_for_speech_recognition.data(),
+        audio_buffer_for_speech_recognition_old.data(),
         audio_buffer_for_speech_recognition.data() + audio_buffer_for_speech_recognition_pos - n_samples_to_keep,
         sizeof(float) * n_samples_to_keep
     );
-    old_audio_buffer_for_speech_recognition_pos = n_samples_to_keep;
+    audio_buffer_for_speech_recognition_old_pos = n_samples_to_keep;
     audio_buffer_for_speech_recognition_pos = 0;
     prompt_tokens_for_speech_recognition.clear();
     
@@ -425,6 +446,7 @@ SDL_AppResult SDL_AppIterate(void *appstate) {
     //     ImGui::ShowDemoWindow(&show_demo_window);
 
     // TODO: Maybe don't do this and run_whisper in the main thread?
+    // I have seen frame rates dropping when running whisper in the main thread
     get_audio_data();
     run_whisper();
 
