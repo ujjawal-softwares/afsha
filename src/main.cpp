@@ -77,7 +77,7 @@ static std::vector<whisper_token> prompt_tokens_for_speech_recognition(n_samples
 
 static struct whisper_context *whisper_ctx = NULL;
 static std::string audio_filename;
-static wav_writer wavWriter;
+// static wav_writer wavWriter;
 
 // TODO: We can parse this from the command line arguments
 // struct whisper_params {
@@ -245,7 +245,7 @@ SDL_AppResult SDL_AppInit(void **appstate, int argc, char *argv[]) {
     strftime(buffer, sizeof(buffer), "%Y%m%d%H%M%S", localtime(&now));
     audio_filename = std::string(buffer) + ".wav";
 
-    wavWriter.open(audio_filename, audio_spec.freq, 16, audio_spec.channels);
+    // wavWriter.open(audio_filename, audio_spec.freq, 16, audio_spec.channels);
 
     whisper_ctx = setup_whisper();
     if (!whisper_ctx) {
@@ -284,7 +284,7 @@ void SDL_AppQuit(void *appstate, SDL_AppResult result) {
     ImGui_ImplSDL3_Shutdown();
     ImGui::DestroyContext();
 
-    wavWriter.close();
+    // wavWriter.close();
     SDL_DestroyAudioStream(stream);
     whisper_free(whisper_ctx);
 }
@@ -328,7 +328,7 @@ void get_audio_data() {
     audio_buffer_for_speech_recognition_pos += audio_buffer_pos;
 
     // SDL_Log("Got audio stream data: %d bytes, buffer_size in bytes: %lu", data_available, audio_buffer.size() * sizeof(float));
-    wavWriter.write(audio_buffer.data(), data_available / sizeof(float));
+    // wavWriter.write(audio_buffer.data(), data_available / sizeof(float));
 }
 
 whisper_context* setup_whisper() {
