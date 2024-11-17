@@ -1,13 +1,20 @@
 #define SDL_MAIN_USE_CALLBACKS 1  /* use the callbacks instead of main() */
 #include <stdio.h>
 #include <string>
+#include <fstream>
+#include <sstream>
+#include <vector>
+#include <thread>
 #include "imgui.h"
 #include "imgui_impl_sdl3.h"
 #include "imgui_impl_opengl3.h"
+#include "whisper.h"
 #include <SDL3/SDL.h>
 #include <SDL3/SDL_main.h>
 #include <SDL3/SDL_opengl.h>
 #include "src/app_config.h"
+#include "wav_writer.h"
+#define WHISPER_SAMPLE_RATE 16000
 
 // We are using ImGUI for creating any UI elements.
 // Dear ImGui: standalone example application for SDL3 + OpenGL
@@ -23,14 +30,14 @@
 static const int WIDTH = 800;
 static const int HEIGHT = 480;
 static const int PADDING = 10;
-/* We will use this renderer to draw into this window every frame. */
 static SDL_Window *window = NULL;
 static SDL_Renderer *renderer = NULL;
+static SDL_AudioStream *stream = NULL;
 static SDL_GLContext gl_context = NULL;
-static bool show_demo_window = true;
 static ImGuiIO *ioRef = NULL;
 static ImFont *font = NULL;
 
+static bool show_demo_window = true;
 
 const std::string APP_VERSION = APP_VERSION_MAJOR + \
         std::string(".") + \
@@ -40,12 +47,74 @@ const std::string APP_VERSION = APP_VERSION_MAJOR + \
 
 static const std::string WINDOW_TITLE = APP_NAME + std::string(" ") + APP_VERSION;
 
+static const int n_samples_step = (1e-3 * 3000) * WHISPER_SAMPLE_RATE;
+static const int n_samples_len  = (1e-3 * 10000) * WHISPER_SAMPLE_RATE;
+
+// TODO: We sometimes need to pla around with n_samples_keep to get the best results
+static const int n_samples_keep = (1e-3 * 100) * WHISPER_SAMPLE_RATE;
+static const int n_samples_30s  = (1e-3 * 30000) * WHISPER_SAMPLE_RATE;
+static const int AUDIO_CHUNK_SIZE = 10240;
+static const int AUDIO_MAX_CHUNK_SIZE = AUDIO_CHUNK_SIZE * 10;
+// overallocate the audio buffer to avoid reallocation
+static const std::vector<float> audio_buffer(AUDIO_MAX_CHUNK_SIZE, 0.0f);
+static int audio_buffer_pos = 0;
+
+// We will keep filling this buffer with new audio samples in audio_buffer
+// once the size reaches n_samples_step, we will try to do speech recognition
+static std::vector<float> audio_buffer_for_speech_recognition(n_samples_30s, 0.0f);
+static int audio_buffer_for_speech_recognition_pos = 0;
+
+// why do we need old audio buffer? because we need n_samples_keep samples from the old buffer
+// so that we can concatenate it with the new buffer
+static std::vector<float> old_audio_buffer_for_speech_recognition(n_samples_keep, 0.0f);
+static int old_audio_buffer_for_speech_recognition_pos = 0;
+
+static std::vector<float> combined_audio_buffer_for_speech_recognition(n_samples_30s + n_samples_keep, 0.0f);
+
+// They are used to store the tokens from the last full length segment as the prompt
+static std::vector<whisper_token> prompt_tokens_for_speech_recognition(n_samples_30s);
+
+
+static struct whisper_context *whisper_ctx = NULL;
+static std::string audio_filename;
+static wav_writer wavWriter;
+
+// TODO: We can parse this from the command line arguments
+// struct whisper_params {
+//     int32_t n_threads  = std::min(4, (int32_t) std::thread::hardware_concurrency());
+//     int32_t step_ms    = 3000;
+//     int32_t length_ms  = 10000;
+//     int32_t keep_ms    = 200;
+//     int32_t capture_id = -1;
+//     int32_t max_tokens = 32;
+//     int32_t audio_ctx  = 0;
+
+//     float vad_thold    = 0.6f;
+//     float freq_thold   = 100.0f;
+
+//     bool translate     = false;
+//     bool no_fallback   = false;
+//     bool print_special = false;
+//     bool no_context    = true;
+//     bool no_timestamps = false;
+//     bool tinydiarize   = false;
+//     bool save_audio    = false; // save audio to wav file
+//     bool use_gpu       = true;
+//     bool flash_attn    = false;
+
+//     std::string language  = "en";
+//     std::string model     = "out/models/ggml-base.en.bin";
+//     std::string fname_out;
+// };
+
+
+whisper_context *setup_whisper();
+
 SDL_AppResult SDL_AppInit(void **appstate, int argc, char *argv[]) {
-    
 
     SDL_SetAppMetadata(APP_NAME, APP_VERSION.c_str(), APP_IDENTIFIER);
 
-    if (!SDL_Init(SDL_INIT_VIDEO)) {
+    if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO)) {
         SDL_Log("Couldn't initialize SDL: %s", SDL_GetError());
         return SDL_APP_FAILURE;
     }
@@ -143,6 +212,46 @@ SDL_AppResult SDL_AppInit(void **appstate, int argc, char *argv[]) {
     // font = io.Fonts->AddFontFromFileTTF("./static/fonts/SF-Pro.ttf", 20.0f);
     // font = io.Fonts->AddFontFromFileTTF("./static/fonts/SF-Pro-Display-Regular.otf", 16.0f);
     // IM_ASSERT(font != nullptr);
+
+
+    // Setup audio stream
+    SDL_AudioSpec audio_spec;
+    SDL_zero(audio_spec);
+
+    // NOTE: Do not change the spec format to anything other than F32LE
+    audio_spec.freq = WHISPER_SAMPLE_RATE;
+    audio_spec.format = SDL_AUDIO_F32LE;
+    audio_spec.channels = 1;
+
+    stream = SDL_OpenAudioDeviceStream(SDL_AUDIO_DEVICE_DEFAULT_RECORDING, &audio_spec, NULL, NULL);
+    if (!stream) {
+        SDL_Log("Couldn't create audio stream: %s", SDL_GetError());
+        return SDL_APP_FAILURE;
+    }
+
+    SDL_AudioDeviceID dev_id = SDL_GetAudioStreamDevice(stream);
+    if (!dev_id) {
+        SDL_Log("Couldn't get audio stream device: %s", SDL_GetError());
+        return SDL_APP_FAILURE;
+    }
+    const char *device_name = SDL_GetAudioDeviceName(dev_id);
+    SDL_Log("Got audio stream: freq: %d, channels: %d, format: %d", audio_spec.freq, audio_spec.channels, audio_spec.format);
+    /* SDL_OpenAudioDeviceStream starts the device paused. You have to tell it to start! */
+    SDL_ResumeAudioStreamDevice(stream);
+
+    // Get current date/time for filename
+    time_t now = time(0);
+    char buffer[80];
+    strftime(buffer, sizeof(buffer), "%Y%m%d%H%M%S", localtime(&now));
+    audio_filename = std::string(buffer) + ".wav";
+
+    wavWriter.open(audio_filename, audio_spec.freq, 16, audio_spec.channels);
+
+    whisper_ctx = setup_whisper();
+    if (!whisper_ctx) {
+        SDL_Log("Couldn't initialize whisper context");
+        return SDL_APP_FAILURE;
+    }
     SDL_Log("SDL_AppInit complete");
     return SDL_APP_CONTINUE;  /* carry on with the program! */
 
@@ -174,6 +283,10 @@ void SDL_AppQuit(void *appstate, SDL_AppResult result) {
     ImGui_ImplOpenGL3_Shutdown();
     ImGui_ImplSDL3_Shutdown();
     ImGui::DestroyContext();
+
+    wavWriter.close();
+    SDL_DestroyAudioStream(stream);
+    whisper_free(whisper_ctx);
 }
 
 void show_current_state() {
@@ -196,6 +309,91 @@ void show_current_state() {
     ImGui::End();
 }
 
+void get_audio_data() {
+    if (SDL_GetAudioStreamAvailable(stream) < AUDIO_CHUNK_SIZE) {
+        return;
+    }
+    const int data_available = SDL_GetAudioStreamData(stream, (void *) audio_buffer.data(), sizeof(float) * audio_buffer.size());
+    if (data_available == -1) {
+        SDL_Log("Couldn't get audio stream data: %s", SDL_GetError());
+        return;
+    }
+    audio_buffer_pos = data_available / sizeof(float);
+
+    memcpy(
+        audio_buffer_for_speech_recognition.data() + audio_buffer_for_speech_recognition_pos,
+        audio_buffer.data(),
+        sizeof(float) * audio_buffer_pos
+    );
+    audio_buffer_for_speech_recognition_pos += audio_buffer_pos;
+
+    // SDL_Log("Got audio stream data: %d bytes, buffer_size in bytes: %lu", data_available, audio_buffer.size() * sizeof(float));
+    wavWriter.write(audio_buffer.data(), data_available / sizeof(float));
+}
+
+whisper_context* setup_whisper() {
+    // TODO: Parse whisper params and model from command line arguments
+    struct whisper_context_params cparams = whisper_context_default_params();
+    std::string model = "out/models/ggml-base.en.bin";
+
+    prompt_tokens_for_speech_recognition.clear();
+
+    struct whisper_context *ctx = whisper_init_from_file_with_params(model.c_str(), cparams);
+    if (!ctx) {
+        SDL_Log("Couldn't initialize whisper context");
+        return nullptr;
+    }
+    return ctx;
+}
+
+void run_whisper() {
+    if (audio_buffer_for_speech_recognition_pos < n_samples_step) {
+        return;
+    }
+    const int n_samples_to_keep = std::min(n_samples_keep, old_audio_buffer_for_speech_recognition_pos);
+    // SDL_Log("n_samples_to_keep: %d", n_samples_to_keep);
+    combined_audio_buffer_for_speech_recognition.clear();
+    memcpy(
+        combined_audio_buffer_for_speech_recognition.data(),
+        old_audio_buffer_for_speech_recognition.data() + old_audio_buffer_for_speech_recognition_pos - n_samples_to_keep,
+        sizeof(float) * n_samples_to_keep
+    );
+    memcpy(
+        combined_audio_buffer_for_speech_recognition.data() + n_samples_to_keep,
+        audio_buffer_for_speech_recognition.data(),
+        sizeof(float) * audio_buffer_for_speech_recognition_pos
+    );
+
+    whisper_full_params wparams = whisper_full_default_params(WHISPER_SAMPLING_GREEDY);
+    wparams.prompt_tokens = prompt_tokens_for_speech_recognition.data();
+
+    if (whisper_full(whisper_ctx, wparams, combined_audio_buffer_for_speech_recognition.data(), audio_buffer_for_speech_recognition_pos + n_samples_to_keep) != 0) {
+        SDL_Log("Failed to process audio");
+        return;
+    }
+
+    memcpy(
+        old_audio_buffer_for_speech_recognition.data(),
+        audio_buffer_for_speech_recognition.data() + audio_buffer_for_speech_recognition_pos - n_samples_to_keep,
+        sizeof(float) * n_samples_to_keep
+    );
+    old_audio_buffer_for_speech_recognition_pos = n_samples_to_keep;
+    audio_buffer_for_speech_recognition_pos = 0;
+    prompt_tokens_for_speech_recognition.clear();
+    
+
+    const int n_segments = whisper_full_n_segments(whisper_ctx);
+    for (int i = 0; i < n_segments; ++i) {
+        const char * text = whisper_full_get_segment_text(whisper_ctx, i);
+        SDL_Log("%s", text);
+
+        const int token_count = whisper_full_n_tokens(whisper_ctx, i);
+        for (int j = 0; j < token_count; ++j) {
+            prompt_tokens_for_speech_recognition.push_back(whisper_full_get_token_id(whisper_ctx, i, j));
+        }
+    }
+}
+
 SDL_AppResult SDL_AppIterate(void *appstate) {
     if (SDL_GetWindowFlags(window) & SDL_WINDOW_MINIMIZED)
     {
@@ -210,6 +408,10 @@ SDL_AppResult SDL_AppIterate(void *appstate) {
     // 1. Show the big demo window (Most of the sample code is in ImGui::ShowDemoWindow()! You can browse its code to learn more about Dear ImGui!).
     // if (show_demo_window)
     //     ImGui::ShowDemoWindow(&show_demo_window);
+
+    // TODO: Maybe don't do this and run_whisper in the main thread?
+    get_audio_data();
+    run_whisper();
 
     show_current_state();
 
