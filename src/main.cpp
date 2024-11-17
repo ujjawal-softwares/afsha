@@ -112,8 +112,109 @@ static int text_speech_recognition_size = 1000;
 //     std::string fname_out;
 // };
 
+void get_audio_data() {
+    if (SDL_GetAudioStreamAvailable(stream) < AUDIO_CHUNK_SIZE) {
+        return;
+    }
+    const int data_available = SDL_GetAudioStreamData(stream, (void *) audio_buffer.data(), sizeof(float) * audio_buffer.size());
+    if (data_available == -1) {
+        SDL_Log("Couldn't get audio stream data: %s", SDL_GetError());
+        return;
+    }
+    audio_buffer_pos = data_available / sizeof(float);
 
-whisper_context *setup_whisper();
+    memcpy(
+        audio_buffer_for_speech_recognition.data() + audio_buffer_for_speech_recognition_pos,
+        audio_buffer.data(),
+        sizeof(float) * audio_buffer_pos
+    );
+    audio_buffer_for_speech_recognition_pos += audio_buffer_pos;
+
+    // SDL_Log("Got audio stream data: %d bytes, buffer_size in bytes: %lu", data_available, audio_buffer.size() * sizeof(float));
+    // wavWriter.write(audio_buffer.data(), data_available / sizeof(float));
+}
+
+whisper_context* setup_whisper() {
+    // TODO: Parse whisper params and model from command line arguments
+    struct whisper_context_params cparams = whisper_context_default_params();
+    std::string model = "out/models/ggml-base.en.bin";
+
+    prompt_tokens_for_speech_recognition.clear();
+
+    struct whisper_context *ctx = whisper_init_from_file_with_params(model.c_str(), cparams);
+    if (!ctx) {
+        SDL_Log("Couldn't initialize whisper context");
+        return nullptr;
+    }
+    return ctx;
+}
+
+void run_whisper() {
+    if (audio_buffer_for_speech_recognition_pos < n_samples_step) {
+        return;
+    }
+    const int n_samples_to_keep = std::min(n_samples_keep, audio_buffer_for_speech_recognition_old_pos);
+    // SDL_Log("n_samples_to_keep: %d", n_samples_to_keep);
+    audio_buffer_for_speech_recognition_combined.clear();
+    memcpy(
+        audio_buffer_for_speech_recognition_combined.data(),
+        audio_buffer_for_speech_recognition_old.data() + audio_buffer_for_speech_recognition_old_pos - n_samples_to_keep,
+        sizeof(float) * n_samples_to_keep
+    );
+    memcpy(
+        audio_buffer_for_speech_recognition_combined.data() + n_samples_to_keep,
+        audio_buffer_for_speech_recognition.data(),
+        sizeof(float) * audio_buffer_for_speech_recognition_pos
+    );
+
+    whisper_full_params wparams = whisper_full_default_params(WHISPER_SAMPLING_GREEDY);
+    wparams.prompt_tokens = prompt_tokens_for_speech_recognition.data();
+
+    if (whisper_full(whisper_ctx, wparams, audio_buffer_for_speech_recognition_combined.data(), audio_buffer_for_speech_recognition_pos + n_samples_to_keep) != 0) {
+        SDL_Log("Failed to process audio");
+        return;
+    }
+
+    memcpy(
+        audio_buffer_for_speech_recognition_old.data(),
+        audio_buffer_for_speech_recognition.data() + audio_buffer_for_speech_recognition_pos - n_samples_to_keep,
+        sizeof(float) * n_samples_to_keep
+    );
+    audio_buffer_for_speech_recognition_old_pos = n_samples_to_keep;
+    audio_buffer_for_speech_recognition_pos = 0;
+    prompt_tokens_for_speech_recognition.clear();
+    
+
+    const int n_segments = whisper_full_n_segments(whisper_ctx);
+    for (int i = 0; i < n_segments; ++i) {
+        const char *text = whisper_full_get_segment_text(whisper_ctx, i);
+        SDL_Log("%s", text);
+
+        if (text_speech_recognition.size() >= text_speech_recognition_size) {
+            text_speech_recognition.pop_front();
+        }
+
+        text_speech_recognition.push_back(text);
+
+        const int token_count = whisper_full_n_tokens(whisper_ctx, i);
+        for (int j = 0; j < token_count; ++j) {
+            prompt_tokens_for_speech_recognition.push_back(whisper_full_get_token_id(whisper_ctx, i, j));
+        }
+    }
+}
+
+void run_function_in_loop(void (*func)()) {
+    while (true) {
+        func();
+        SDL_Delay(1);
+    }
+}
+
+int run_function_sdl(void *ptr) {
+    void (*func)() = (void (*)()) ptr;
+    run_function_in_loop(func);
+    return 0;
+}
 
 SDL_AppResult SDL_AppInit(void **appstate, int argc, char *argv[]) {
 
@@ -257,10 +358,22 @@ SDL_AppResult SDL_AppInit(void **appstate, int argc, char *argv[]) {
         SDL_Log("Couldn't initialize whisper context");
         return SDL_APP_FAILURE;
     }
+
+    // TODO: Maybe don't do this and run_whisper in the main thread?
+    // I have seen frame rates dropping when running whisper in the main thread
+    // get_audio_data();
+    // run_whisper();
+    SDL_DetachThread(
+        SDL_CreateThread(run_function_sdl, "get_audio_data_loop", (void *) get_audio_data)
+    );
+    SDL_DetachThread(
+        SDL_CreateThread(run_function_sdl, "run_whisper_loop", (void *) run_whisper)
+    );
     SDL_Log("SDL_AppInit complete");
     return SDL_APP_CONTINUE;  /* carry on with the program! */
 
 }
+
 
 /* This function runs when a new event (mouse input, keypresses, etc) occurs. */
 SDL_AppResult SDL_AppEvent(void *appstate, SDL_Event *event) {
@@ -296,17 +409,18 @@ void SDL_AppQuit(void *appstate, SDL_AppResult result) {
 
 void show_current_state() {
     // Note: https://pthom.github.io/imgui_manual_online/manual/imgui_manual.html
+    // This website is great for learning how to use ImGui
+    // Kudos to the author Emscripten, and webassembly.
     const int window_flags = ImGuiWindowFlags_NoResize | \
         ImGuiWindowFlags_NoMove | \
         ImGuiWindowFlags_NoSavedSettings | \
         ImGuiWindowFlags_NoBackground;
 
-    // Create a window for the right hand side of the screen
     const ImVec2 content_region = {ioRef->DisplaySize.x, ioRef->DisplaySize.y};
-
-
     const ImVec2 window_size = ImVec2(content_region.x / 2 - PADDING, content_region.y - PADDING * 2);
     ImGui::SetNextWindowSize(window_size);
+
+    // Window on the right side of the screen
     const ImVec2 window_postition = ImVec2(ioRef->DisplaySize.x - window_size.x - PADDING, PADDING);
     ImGui::SetNextWindowPos(window_postition);
     ImGui::Begin(
@@ -329,7 +443,6 @@ void show_current_state() {
             for (const auto &text : text_speech_recognition) {
                 text_in_queue += text + "\n";
             }
-            // TODO: Show audio stream here, use whisper cpp
             ImGui::TextWrapped(text_in_queue.c_str());
             ImGui::EndChild();
             ImGui::EndTabItem();
@@ -337,97 +450,6 @@ void show_current_state() {
     }
     ImGui::EndTabBar();
     ImGui::End();
-}
-
-void get_audio_data() {
-    if (SDL_GetAudioStreamAvailable(stream) < AUDIO_CHUNK_SIZE) {
-        return;
-    }
-    const int data_available = SDL_GetAudioStreamData(stream, (void *) audio_buffer.data(), sizeof(float) * audio_buffer.size());
-    if (data_available == -1) {
-        SDL_Log("Couldn't get audio stream data: %s", SDL_GetError());
-        return;
-    }
-    audio_buffer_pos = data_available / sizeof(float);
-
-    memcpy(
-        audio_buffer_for_speech_recognition.data() + audio_buffer_for_speech_recognition_pos,
-        audio_buffer.data(),
-        sizeof(float) * audio_buffer_pos
-    );
-    audio_buffer_for_speech_recognition_pos += audio_buffer_pos;
-
-    // SDL_Log("Got audio stream data: %d bytes, buffer_size in bytes: %lu", data_available, audio_buffer.size() * sizeof(float));
-    // wavWriter.write(audio_buffer.data(), data_available / sizeof(float));
-}
-
-whisper_context* setup_whisper() {
-    // TODO: Parse whisper params and model from command line arguments
-    struct whisper_context_params cparams = whisper_context_default_params();
-    std::string model = "out/models/ggml-base.en.bin";
-
-    prompt_tokens_for_speech_recognition.clear();
-
-    struct whisper_context *ctx = whisper_init_from_file_with_params(model.c_str(), cparams);
-    if (!ctx) {
-        SDL_Log("Couldn't initialize whisper context");
-        return nullptr;
-    }
-    return ctx;
-}
-
-void run_whisper() {
-    if (audio_buffer_for_speech_recognition_pos < n_samples_step) {
-        return;
-    }
-    const int n_samples_to_keep = std::min(n_samples_keep, audio_buffer_for_speech_recognition_old_pos);
-    // SDL_Log("n_samples_to_keep: %d", n_samples_to_keep);
-    audio_buffer_for_speech_recognition_combined.clear();
-    memcpy(
-        audio_buffer_for_speech_recognition_combined.data(),
-        audio_buffer_for_speech_recognition_old.data() + audio_buffer_for_speech_recognition_old_pos - n_samples_to_keep,
-        sizeof(float) * n_samples_to_keep
-    );
-    memcpy(
-        audio_buffer_for_speech_recognition_combined.data() + n_samples_to_keep,
-        audio_buffer_for_speech_recognition.data(),
-        sizeof(float) * audio_buffer_for_speech_recognition_pos
-    );
-
-    whisper_full_params wparams = whisper_full_default_params(WHISPER_SAMPLING_GREEDY);
-    wparams.prompt_tokens = prompt_tokens_for_speech_recognition.data();
-
-    if (whisper_full(whisper_ctx, wparams, audio_buffer_for_speech_recognition_combined.data(), audio_buffer_for_speech_recognition_pos + n_samples_to_keep) != 0) {
-        SDL_Log("Failed to process audio");
-        return;
-    }
-
-    memcpy(
-        audio_buffer_for_speech_recognition_old.data(),
-        audio_buffer_for_speech_recognition.data() + audio_buffer_for_speech_recognition_pos - n_samples_to_keep,
-        sizeof(float) * n_samples_to_keep
-    );
-    audio_buffer_for_speech_recognition_old_pos = n_samples_to_keep;
-    audio_buffer_for_speech_recognition_pos = 0;
-    prompt_tokens_for_speech_recognition.clear();
-    
-
-    const int n_segments = whisper_full_n_segments(whisper_ctx);
-    for (int i = 0; i < n_segments; ++i) {
-        const char *text = whisper_full_get_segment_text(whisper_ctx, i);
-        SDL_Log("%s", text);
-
-        if (text_speech_recognition.size() >= text_speech_recognition_size) {
-            text_speech_recognition.pop_front();
-        }
-
-        text_speech_recognition.push_back(text);
-
-        const int token_count = whisper_full_n_tokens(whisper_ctx, i);
-        for (int j = 0; j < token_count; ++j) {
-            prompt_tokens_for_speech_recognition.push_back(whisper_full_get_token_id(whisper_ctx, i, j));
-        }
-    }
 }
 
 SDL_AppResult SDL_AppIterate(void *appstate) {
@@ -444,12 +466,6 @@ SDL_AppResult SDL_AppIterate(void *appstate) {
     // 1. Show the big demo window (Most of the sample code is in ImGui::ShowDemoWindow()! You can browse its code to learn more about Dear ImGui!).
     // if (show_demo_window)
     //     ImGui::ShowDemoWindow(&show_demo_window);
-
-    // TODO: Maybe don't do this and run_whisper in the main thread?
-    // I have seen frame rates dropping when running whisper in the main thread
-    get_audio_data();
-    run_whisper();
-
     show_current_state();
 
     // Rendering
