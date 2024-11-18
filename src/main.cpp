@@ -82,6 +82,16 @@ static struct whisper_context *whisper_ctx = NULL;
 static std::deque<std::string> text_speech_recognition;
 static int text_speech_recognition_size = 1000;
 
+static SDL_CameraID camera_id = 0;
+static SDL_Camera *camera = NULL;
+static SDL_CameraSpec spec;
+
+static SDL_Surface *current_frame = NULL;
+static SDL_Texture *current_frame_texture = NULL;
+static bool current_frame_texture_updated = false;
+static int video_stream_width = 0;
+static ImVec4 clear_color = ImVec4(0.45f, 0.55f, 0.60f, 1.00f);
+
 
 // TODO: We can parse this from the command line arguments
 // struct whisper_params {
@@ -235,11 +245,26 @@ int get_window_device_pixel_ratio() {
     return wp / w;
 }
 
+static void PrintCameraSpecs(SDL_CameraID camera_id)
+{
+    SDL_CameraSpec **specs = SDL_GetCameraSupportedFormats(camera_id, NULL);
+    if (specs) {
+        int i;
+
+        SDL_Log("Available formats:\n");
+        for (i = 0; specs[i]; ++i) {
+            const SDL_CameraSpec *s = specs[i];
+            SDL_Log("    %dx%d %.2f FPS %s\n", s->width, s->height, (float)s->framerate_numerator / s->framerate_denominator, SDL_GetPixelFormatName(s->format));
+        }
+        SDL_free(specs);
+    }
+}
+
 SDL_AppResult SDL_AppInit(void **appstate, int argc, char *argv[]) {
 
     SDL_SetAppMetadata(APP_NAME, APP_VERSION.c_str(), APP_IDENTIFIER);
 
-    if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO)) {
+    if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO | SDL_INIT_CAMERA)) {
         SDL_Log("Couldn't initialize SDL: %s", SDL_GetError());
         return SDL_APP_FAILURE;
     }
@@ -247,7 +272,7 @@ SDL_AppResult SDL_AppInit(void **appstate, int argc, char *argv[]) {
     Uint32 window_flags = SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIDDEN | SDL_WINDOW_HIGH_PIXEL_DENSITY;
     window = SDL_CreateWindow(WINDOW_TITLE.c_str(), WIDTH, HEIGHT, window_flags);
     if (!window) {
-        SDL_Log("Couldn't create window/renderer: %s", SDL_GetError());
+        SDL_Log("Couldn't create window: %s", SDL_GetError());
         return SDL_APP_FAILURE;
     }
     renderer = SDL_CreateRenderer(window, nullptr);
@@ -346,6 +371,34 @@ SDL_AppResult SDL_AppInit(void **appstate, int argc, char *argv[]) {
     /* SDL_OpenAudioDeviceStream starts the device paused. You have to tell it to start! */
     SDL_ResumeAudioStreamDevice(stream);
 
+    int devcount = 0;
+    SDL_CameraID *devices = SDL_GetCameras(&devcount);
+    if (!devices) {
+        SDL_Log("SDL_GetCameras failed: %s", SDL_GetError());
+        return SDL_APP_FAILURE;
+    }
+    if (devcount == 0) {
+        SDL_Log("No cameras found");
+        return SDL_APP_FAILURE;
+    } else {
+        SDL_Log("Found %d cameras", devcount);
+        // TODO: Fix this later if needed
+        // choose the first device as the camera
+        camera_id = devices[0];
+        PrintCameraSpecs(camera_id);
+    }
+    SDL_free(devices);
+
+
+    // try 30 FPS
+    spec.framerate_numerator = 30;
+    spec.framerate_denominator = 1;
+    camera = SDL_OpenCamera(camera_id, &spec);
+    if (!camera) {
+        SDL_Log("Failed to open camera device: %s", SDL_GetError());
+        return SDL_APP_FAILURE;
+    }
+
     // Get current date/time for filename
     // time_t now = time(0);
     // char buffer[80];
@@ -371,8 +424,6 @@ SDL_AppResult SDL_AppInit(void **appstate, int argc, char *argv[]) {
         SDL_CreateThread(run_function_sdl, "run_whisper_loop", (void *) run_whisper)
     );
 
-
-    // Try to setup camera
     SDL_Log("SDL_AppInit complete");
     return SDL_APP_CONTINUE;  /* carry on with the program! */
 
@@ -387,28 +438,87 @@ SDL_AppResult SDL_AppEvent(void *appstate, SDL_Event *event) {
     // - When io.WantCaptureKeyboard is true, do not dispatch keyboard input data to your main application, or clear/overwrite your copy of the keyboard data.
     // Generally you may always pass all inputs to dear imgui, and hide them from your application based on those two flags.
     ImGui_ImplSDL3_ProcessEvent(event);
+    // SDL_Log("SDL_AppEvent called with event type %d", event->type);
     if (event->type == SDL_EVENT_QUIT) {
         SDL_Log("SDL_EVENT_QUIT event received");
         return SDL_APP_SUCCESS;  /* end the program, reporting success to the OS. */
-    }
-    if (event->type == SDL_EVENT_WINDOW_CLOSE_REQUESTED && event->window.windowID == SDL_GetWindowID(window)) {
+    } else if (event->type == SDL_EVENT_WINDOW_CLOSE_REQUESTED && event->window.windowID == SDL_GetWindowID(window)) {
         SDL_Log("SDL_EVENT_WINDOW_CLOSE_REQUESTED event received");
         return SDL_APP_SUCCESS;  /* end the program, reporting success to the OS. */
+    } else if (event->type == SDL_EVENT_CAMERA_DEVICE_APPROVED) {
+        SDL_Log("Camera approved!");
+        SDL_CameraSpec camera_spec;
+        SDL_GetCameraFormat(camera, &camera_spec);
+        float fps = 0;
+        if (camera_spec.framerate_denominator != 0) {
+            fps = (float)camera_spec.framerate_numerator / (float)camera_spec.framerate_denominator;
+        }
+        SDL_Log("Camera Spec: %dx%d %.2f FPS %s",
+                camera_spec.width, camera_spec.height, fps, SDL_GetPixelFormatName(camera_spec.format));
+    } else if (event->type == SDL_EVENT_CAMERA_DEVICE_DENIED) {
+        // TODO: Debug this. This event is not being triggered when I deny camera access
+        // This might just be a MacOS issue
+        SDL_Log("Camera denied!");
+        SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "Camera permission denied!", "User denied access to the camera!", window);
+        return SDL_APP_FAILURE;
     }
     return SDL_APP_CONTINUE;  /* carry on with the program! */
+}
+
+void update_camera_frame() {
+    if (!camera) {
+        return;
+    }
+    SDL_Surface *next_frame = SDL_AcquireCameraFrame(camera, NULL);
+
+    // There is no space for NULL in my home
+    if (!next_frame) {
+        return;
+    }
+    // SDL_Log("Got camera frame: %p", next_frame);
+    if (current_frame && next_frame) {
+        SDL_ReleaseCameraFrame(camera, current_frame);
+    }
+    current_frame = next_frame;
+
+    if (!current_frame_texture) {
+        SDL_Colorspace colorspace = SDL_GetSurfaceColorspace(current_frame);
+
+        /* Create texture with appropriate format */
+        SDL_PropertiesID props = SDL_CreateProperties();
+        SDL_SetNumberProperty(props, SDL_PROP_TEXTURE_CREATE_FORMAT_NUMBER, current_frame->format);
+        SDL_SetNumberProperty(props, SDL_PROP_TEXTURE_CREATE_COLORSPACE_NUMBER, colorspace);
+        SDL_SetNumberProperty(props, SDL_PROP_TEXTURE_CREATE_ACCESS_NUMBER, SDL_TEXTUREACCESS_STREAMING);
+        SDL_SetNumberProperty(props, SDL_PROP_TEXTURE_CREATE_WIDTH_NUMBER, current_frame->w);
+
+        SDL_Log("Video stream width: %d, height: %d", current_frame->w, current_frame->h);
+        SDL_SetNumberProperty(props, SDL_PROP_TEXTURE_CREATE_HEIGHT_NUMBER, current_frame->h);
+        current_frame_texture = SDL_CreateTextureWithProperties(renderer, props);
+        SDL_DestroyProperties(props);
+        if (!current_frame_texture) {
+            SDL_Log("Couldn't create texture: %s", SDL_GetError());
+            return;
+        }
+    }
+    // TODO: Docs say the below statement
+    // This is a fairly slow function, intended for use with static textures that do not change often.
+    SDL_UpdateTexture(current_frame_texture, NULL, current_frame->pixels, current_frame->pitch);
 }
 
 /* This function runs once at shutdown. */
 void SDL_AppQuit(void *appstate, SDL_AppResult result) {
     SDL_Log("SDL_AppQuit called with result %d, cleaning up", result);
-    /* SDL will clean up the window/renderer for us. */
+    whisper_free(whisper_ctx);
     ImGui_ImplSDLRenderer3_Shutdown();
     ImGui_ImplSDL3_Shutdown();
     ImGui::DestroyContext();
 
     // wavWriter.close();
     SDL_DestroyAudioStream(stream);
-    whisper_free(whisper_ctx);
+    SDL_ReleaseCameraFrame(camera, current_frame);
+    SDL_CloseCamera(camera);
+    SDL_DestroyTexture(current_frame_texture);
+    /* SDL will clean up the window/renderer for us. */
 }
 
 void show_current_state() {
@@ -435,11 +545,39 @@ void show_current_state() {
     ImGui::TextWrapped("Application version: %s", APP_VERSION.c_str());
     ImGui::TextWrapped("Application average %.3f ms/frame (%.1f FPS)", 1000.0f / ioRef->Framerate, ioRef->Framerate);
     ImGui::TextWrapped("Application window size: %.0f x %.0f", ioRef->DisplaySize.x, ioRef->DisplaySize.y);
+    ImVec2 available_size = ImGui::GetContentRegionAvail();
+    // TODO: Add a little padding in the width
+    video_stream_width = available_size.x;
+
+    // SDL_Log("Available size: %f, %f", available_size.x, available_size.y);
     if (ImGui::BeginTabBar("Current State Tab Bar", ImGuiTabBarFlags_None)) {
+        // SDL_Log("GetContentRegionMax: %f, %f", ImGui::GetContentRegionMax().x, ImGui::GetContentRegionMax().y);
+        if (ImGui::BeginTabItem("Video Stream")) {
+            ImGui::BeginChild(
+                "Video Stream",
+                ImVec2(0.0f, 0.0f),
+                ImGuiChildFlags_None,
+                ImGuiWindowFlags_None
+            );
+            ImGui::SeparatorText("Video Stream");
+            // get current date time
+            time_t now = time(0);
+            char buffer[80];
+            strftime(buffer, sizeof(buffer), "%Y:%m:%d %H:%M:%S", localtime(&now));
+
+            ImGui::TextWrapped("Today: %s", buffer);
+            int video_stream_height = (int) ((float) current_frame->h * video_stream_width / current_frame->w);
+            if (current_frame_texture) {
+                ImGui::Image((ImTextureID)(intptr_t) current_frame_texture, ImVec2(video_stream_width, video_stream_height));
+            }
+            ImGui::EndChild();
+            ImGui::EndTabItem();
+        }
+
         if (ImGui::BeginTabItem("Audio Stream")) {
             ImGui::BeginChild(
                 "Audio Stream",
-                ImVec2(ImGui::GetContentRegionAvail().x, ImGui::GetContentRegionAvail().y),
+                ImVec2(0.0f, 0.0f),
                 ImGuiChildFlags_None,
                 ImGuiWindowFlags_AlwaysVerticalScrollbar
             );
@@ -449,7 +587,9 @@ void show_current_state() {
             }
             ImGui::TextWrapped(text_in_queue.c_str());
             // scroll to the bottom
-            ImGui::SetScrollHereY(1.0f);
+            // TODO: Since show_current_state() is called every frame, this will scroll to the bottom every frame.
+            // This causes issues when the user tries to scroll up to see the previous text.
+            // ImGui::SetScrollHereY(1.0f);
             ImGui::EndChild();
             ImGui::EndTabItem();
         }
@@ -464,6 +604,7 @@ SDL_AppResult SDL_AppIterate(void *appstate) {
         SDL_Delay(10);
         return SDL_APP_CONTINUE;
     }
+    SDL_RenderClear(renderer);
     // Start the Dear ImGui frame
     ImGui_ImplSDLRenderer3_NewFrame();
     ImGui_ImplSDL3_NewFrame();
@@ -472,12 +613,16 @@ SDL_AppResult SDL_AppIterate(void *appstate) {
     // 1. Show the big demo window (Most of the sample code is in ImGui::ShowDemoWindow()! You can browse its code to learn more about Dear ImGui!).
     // if (show_demo_window)
     //     ImGui::ShowDemoWindow(&show_demo_window);
+
+    // Do not return void from below functions, change their definitions
+    // return SDL_AppResult
     show_current_state();
+    update_camera_frame();
 
     // Rendering
     ImGui::Render();
     SDL_SetRenderScale(renderer, ioRef->DisplayFramebufferScale.x, ioRef->DisplayFramebufferScale.y);
-    SDL_RenderClear(renderer);
+    SDL_SetRenderDrawColorFloat(renderer, clear_color.x, clear_color.y, clear_color.z, clear_color.w);
     ImGui_ImplSDLRenderer3_RenderDrawData(ImGui::GetDrawData(), renderer);
     SDL_RenderPresent(renderer);
 
