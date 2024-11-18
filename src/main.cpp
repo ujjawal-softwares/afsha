@@ -559,15 +559,13 @@ void show_current_state() {
                 ImGuiChildFlags_None,
                 ImGuiWindowFlags_None
             );
-            ImGui::SeparatorText("Video Stream");
             // get current date time
             time_t now = time(0);
             char buffer[80];
-            strftime(buffer, sizeof(buffer), "%Y:%m:%d %H:%M:%S", localtime(&now));
-
-            ImGui::TextWrapped("Today: %s", buffer);
+            strftime(buffer, sizeof(buffer), "Today: %Y-%m-%d %H:%M:%S", localtime(&now));
+            ImGui::SeparatorText(buffer);
             int video_stream_height = (int) ((float) current_frame->h * video_stream_width / current_frame->w);
-            if (current_frame_texture) {
+            if (current_frame_texture != NULL) {
                 ImGui::Image((ImTextureID)(intptr_t) current_frame_texture, ImVec2(video_stream_width, video_stream_height));
             }
             ImGui::EndChild();
