@@ -227,6 +227,16 @@ int run_function_sdl(void *ptr) {
     return 0;
 }
 
+int get_window_device_pixel_ratio() {
+    int wp, hp;
+    SDL_GetWindowSizeInPixels(window, &wp, &hp);
+
+    int w, h;
+    SDL_GetWindowSize(window, &w, &h);
+
+    return wp / w;
+}
+
 SDL_AppResult SDL_AppInit(void **appstate, int argc, char *argv[]) {
 
     SDL_SetAppMetadata(APP_NAME, APP_VERSION.c_str(), APP_IDENTIFIER);
@@ -306,6 +316,11 @@ SDL_AppResult SDL_AppInit(void **appstate, int argc, char *argv[]) {
     ImGui_ImplSDL3_InitForOpenGL(window, gl_context);
     ImGui_ImplOpenGL3_Init(glsl_version);
 
+    int window_device_pixel_ratio = get_window_device_pixel_ratio();
+    SDL_Log("Device pixel ratio: %d", window_device_pixel_ratio);
+    ImGui::GetIO().FontGlobalScale = 1.f / window_device_pixel_ratio;
+
+
     // Load Fonts
     // - If no fonts are loaded, dear imgui will use the default font. You can also load multiple fonts and use ImGui::PushFont()/PopFont() to select them.
     // - AddFontFromFileTTF() will return the ImFont* so you can store it if you need to select the font among multiple.
@@ -327,8 +342,15 @@ SDL_AppResult SDL_AppInit(void **appstate, int argc, char *argv[]) {
     // TODO: embed fonts in source code: https://github.com/ocornut/imgui/blob/master/docs/FONTS.md#loading-font-data-embedded-in-source-code
     // TODO: Add support for emojis.
     // font = io.Fonts->AddFontFromFileTTF("./static/fonts/SF-Pro.ttf", 20.0f);
-    // font = io.Fonts->AddFontFromFileTTF("./static/fonts/SF-Pro-Display-Regular.otf", 16.0f);
-    // IM_ASSERT(font != nullptr);
+    font = io.Fonts->AddFontFromFileTTF("out/fonts/OpenSans-Regular.ttf", 16.0f * window_device_pixel_ratio);
+    IM_ASSERT(font != nullptr);
+
+
+    // Add this for sharpening the default font
+    // float SCALE = window_device_pixel_ratio;
+    // ImFontConfig cfg;
+    // cfg.SizePixels = 13 * SCALE;
+    // ImGui::GetIO().Fonts->AddFontDefault(&cfg);
 
 
     // Setup audio stream
@@ -458,6 +480,8 @@ void show_current_state() {
                 text_in_queue += text + "\n";
             }
             ImGui::TextWrapped(text_in_queue.c_str());
+            // scroll to the bottom
+            ImGui::SetScrollHereY(1.0f);
             ImGui::EndChild();
             ImGui::EndTabItem();
         }
