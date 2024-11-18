@@ -64,6 +64,7 @@ static int audio_buffer_pos = 0;
 // once the size reaches n_samples_step, we will try to do speech recognition
 static std::vector<float> audio_buffer_for_speech_recognition(n_samples_30s, 0.0f);
 static int audio_buffer_for_speech_recognition_pos = 0;
+static std::mutex audio_buffer_for_speech_recognition_mutex;
 
 // why do we need old audio buffer? because we need n_samples_keep samples from the old buffer
 // so that we can concatenate it with the new buffer
@@ -123,13 +124,15 @@ void get_audio_data() {
     }
     audio_buffer_pos = data_available / sizeof(float);
 
-    memcpy(
-        audio_buffer_for_speech_recognition.data() + audio_buffer_for_speech_recognition_pos,
-        audio_buffer.data(),
-        sizeof(float) * audio_buffer_pos
-    );
-    audio_buffer_for_speech_recognition_pos += audio_buffer_pos;
-
+    {
+        std::lock_guard<std::mutex> lock(audio_buffer_for_speech_recognition_mutex);
+        memcpy(
+            audio_buffer_for_speech_recognition.data() + audio_buffer_for_speech_recognition_pos,
+            audio_buffer.data(),
+            sizeof(float) * audio_buffer_pos
+        );
+        audio_buffer_for_speech_recognition_pos += audio_buffer_pos;
+    }
     // SDL_Log("Got audio stream data: %d bytes, buffer_size in bytes: %lu", data_available, audio_buffer.size() * sizeof(float));
     // wavWriter.write(audio_buffer.data(), data_available / sizeof(float));
 }
@@ -161,29 +164,37 @@ void run_whisper() {
         audio_buffer_for_speech_recognition_old.data() + audio_buffer_for_speech_recognition_old_pos - n_samples_to_keep,
         sizeof(float) * n_samples_to_keep
     );
-    memcpy(
-        audio_buffer_for_speech_recognition_combined.data() + n_samples_to_keep,
-        audio_buffer_for_speech_recognition.data(),
-        sizeof(float) * audio_buffer_for_speech_recognition_pos
-    );
+
+    int audio_buffer_for_speech_recognition_combined_size = n_samples_to_keep;
+    {
+        std::lock_guard<std::mutex> lock(audio_buffer_for_speech_recognition_mutex);
+        memcpy(
+            audio_buffer_for_speech_recognition_combined.data() + n_samples_to_keep,
+            audio_buffer_for_speech_recognition.data(),
+            sizeof(float) * audio_buffer_for_speech_recognition_pos
+        );
+
+        memcpy(
+            audio_buffer_for_speech_recognition_old.data(),
+            audio_buffer_for_speech_recognition.data() + audio_buffer_for_speech_recognition_pos - n_samples_to_keep,
+            sizeof(float) * n_samples_to_keep
+        );
+
+        audio_buffer_for_speech_recognition_combined_size += audio_buffer_for_speech_recognition_pos;
+        audio_buffer_for_speech_recognition_old_pos = n_samples_to_keep;
+        audio_buffer_for_speech_recognition_pos = 0;
+    }
 
     whisper_full_params wparams = whisper_full_default_params(WHISPER_SAMPLING_GREEDY);
     wparams.prompt_tokens = prompt_tokens_for_speech_recognition.data();
 
-    if (whisper_full(whisper_ctx, wparams, audio_buffer_for_speech_recognition_combined.data(), audio_buffer_for_speech_recognition_pos + n_samples_to_keep) != 0) {
+    if (whisper_full(whisper_ctx, wparams, audio_buffer_for_speech_recognition_combined.data(), audio_buffer_for_speech_recognition_combined_size) != 0) {
         SDL_Log("Failed to process audio");
         return;
     }
 
-    memcpy(
-        audio_buffer_for_speech_recognition_old.data(),
-        audio_buffer_for_speech_recognition.data() + audio_buffer_for_speech_recognition_pos - n_samples_to_keep,
-        sizeof(float) * n_samples_to_keep
-    );
-    audio_buffer_for_speech_recognition_old_pos = n_samples_to_keep;
-    audio_buffer_for_speech_recognition_pos = 0;
     prompt_tokens_for_speech_recognition.clear();
-    
+
 
     const int n_segments = whisper_full_n_segments(whisper_ctx);
     for (int i = 0; i < n_segments; ++i) {
@@ -369,6 +380,9 @@ SDL_AppResult SDL_AppInit(void **appstate, int argc, char *argv[]) {
     SDL_DetachThread(
         SDL_CreateThread(run_function_sdl, "run_whisper_loop", (void *) run_whisper)
     );
+
+
+    // Try to setup camera
     SDL_Log("SDL_AppInit complete");
     return SDL_APP_CONTINUE;  /* carry on with the program! */
 
